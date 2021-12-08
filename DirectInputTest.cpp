@@ -7,23 +7,27 @@
 #include <dinput.h>
 #include <wrl/client.h>
 
+#include <charconv>
 #include <cstdlib>
 #include <format>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+using namespace std::string_view_literals;
 
 static ComPtr<IDirectInput> dinput;
 static std::vector<DIDEVICEINSTANCE> devices;
 
-int main(void);
-static void main2(void);
+int main(int, char **);
+static void main2(int, char **);
 static BOOL CALLBACK EnumCB(LPCDIDEVICEINSTANCE, LPVOID);
-static void Acquire(const GUID &);
+static void Acquire(const GUID &, LPCDIDATAFORMAT, DWORD);
 static std::string Guid2String(const GUID &);
 
 template<class T>
@@ -32,11 +36,11 @@ static auto as_unsigned(const T &value)
 	return static_cast<std::make_unsigned_t<T>>(value);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	try
 	{
-		main2();
+		main2(argc, argv);
 		return EXIT_SUCCESS;
 	}
 	catch (const std::runtime_error &e)
@@ -46,8 +50,26 @@ int main(void)
 	}
 }
 
-static void main2(void)
+static void main2(int argc, char **argv)
 {
+	DWORD cooperativeLevel{DISCL_EXCLUSIVE | DISCL_FOREGROUND};
+
+	for (int i = 1; i < argc; ++i)
+	{
+		if (argv[i] == "-cl"sv && i < argc - 1)
+		{
+			++i;
+			if (std::from_chars(argv[i], argv[i] + std::char_traits<char>::length(argv[i]), cooperativeLevel, 16).ec != std::errc{})
+				throw std::runtime_error{std::format("Cannot parse \"{}\"", argv[i])};
+		}
+		else
+		{
+			throw std::runtime_error{std::format("Invalid command line argument: \"{}\"", argv[i])};
+		}
+	}
+
+	std::cout << std::format("Cooperative level: 0x{:X}\n\n", cooperativeLevel);
+
 	const auto hrCreate = DirectInputCreate(GetModuleHandle(nullptr), DIRECTINPUT_VERSION, &dinput, nullptr);
 	if (hrCreate != DI_OK)
 		throw std::runtime_error{std::format("DirectInputCreate returned {:X}", as_unsigned(hrCreate))};
@@ -72,13 +94,22 @@ static void main2(void)
 			" wUsagePage = " << std::format("0x{:X}", devInfo.wUsagePage) << "\n"
 			" wUsage = " << std::format("0x{:X}", devInfo.wUsage) << "\n\n";
 
-		try
+		constexpr std::pair<std::string_view, LPCDIDATAFORMAT> dataFormats[]
 		{
-			Acquire(devInfo.guidInstance);
-		}
-		catch (const std::runtime_error &e)
+			{ "c_dfDIJoystick" , &c_dfDIJoystick  },
+			{ "c_dfDIJoystick2", &c_dfDIJoystick2 }
+		};
+		for (const auto &df : dataFormats)
 		{
-			std::cerr << " " << e.what() << "\n\n";
+			std::cout << std::format("Acquire(df={})\n\n", df.first);
+			try
+			{
+				Acquire(devInfo.guidInstance, df.second, cooperativeLevel);
+			}
+			catch (const std::runtime_error &e)
+			{
+				std::cerr << " " << e.what() << "\n\n";
+			}
 		}
 
 		++i;
@@ -91,7 +122,7 @@ static BOOL CALLBACK EnumCB(const LPCDIDEVICEINSTANCE lpddi, LPVOID)
 	return DIENUM_CONTINUE;
 }
 
-static void Acquire(const GUID &guid)
+static void Acquire(const GUID &guid, const LPCDIDATAFORMAT dataFormat, const DWORD cooperativeLevel)
 {
 	ComPtr<IDirectInputDevice> dev;
 	const auto hrCreate = dinput->CreateDevice(guid, &dev, nullptr);
@@ -103,11 +134,11 @@ static void Acquire(const GUID &guid)
 	if (hrQueryIfc != S_OK)
 		throw std::runtime_error{std::format("QueryInterface (IDirectInputDevice2) returned {:X}", as_unsigned(hrQueryIfc))};
 
-	const auto hrSetFormat = dev2->SetDataFormat(&c_dfDIJoystick);
+	const auto hrSetFormat = dev2->SetDataFormat(dataFormat);
 	if (hrSetFormat != S_OK)
 		throw std::runtime_error{std::format("SetDataFormat returned {:X}", as_unsigned(hrSetFormat))};
 
-	const auto hrSetCL = dev2->SetCooperativeLevel(GetConsoleWindow(), DISCL_EXCLUSIVE | DISCL_FOREGROUND);
+	const auto hrSetCL = dev2->SetCooperativeLevel(GetConsoleWindow(), cooperativeLevel);
 	if (hrSetCL != S_OK)
 		throw std::runtime_error{std::format("SetCooperativeLevel returned {:X}", as_unsigned(hrSetCL))};
 
